@@ -23,6 +23,7 @@ load(":retired_arguments_test.bzl", "retired_argument_test")
 load(":sdc_clock_period_test.bzl", "runfiles_contents_test", "synth_action_inputs_test")
 load(":slang_frontend_test.bzl", "slang_frontend_test_suite")
 load(":source_input_propagation_test.bzl", "source_input_propagation_test")
+load(":stage_exec_properties_test.bzl", "stage_exec_properties_test", "stage_exec_properties_test_suite")
 load(":stages_filter_test.bzl", "stages_filter_test_suite")
 load(":work_home_test.bzl", "work_home_test_suite")
 load(":yosys_tcl_library_test.bzl", "yosys_tcl_library_test")
@@ -382,6 +383,58 @@ orfs_flow(
     sources = LB_SOURCES,
     variant = "test",
     verilog_files = LB_VERILOG_FILES,
+)
+
+# stage_exec_properties: grt and route reserve CPUs over the flow's
+# platform property, and OpenROAD's threads follow the reservation unless
+# the stage sets NUM_CORES itself. Analysed by the stage_exec_properties_*
+# tests; never built.
+# buildifier: disable=duplicated-name
+orfs_flow(
+    name = "lb_32x128",
+    arguments = LB_ARGS,
+    exec_properties = {"OSFamily": "linux"},
+    last_stage = "route",
+    previous_stage = {"floorplan": ":lb_32x128_synth"},
+    sources = LB_SOURCES,
+    stage_arguments = {"route": {"NUM_CORES": "2"}},
+    stage_exec_properties = {
+        "grt": {
+            "cpu_count": "8",
+            "memory_kb": "16777216",
+        },
+        "route": {"cpu_count": "4"},
+    },
+    tags = ["manual"],
+    variant = "reserve",
+    verilog_files = LB_VERILOG_FILES,
+)
+
+stage_exec_properties_test(
+    name = "stage_exec_properties_grt_test",
+    expected_exec_properties = {
+        "OSFamily": "linux",
+        "cpu_count": "8",
+        "memory_kb": "16777216",
+    },
+    num_cores = "8",
+    target_under_test = ":lb_32x128_reserve_grt",
+)
+
+stage_exec_properties_test(
+    name = "stage_exec_properties_route_test",
+    expected_exec_properties = {
+        "OSFamily": "linux",
+        "cpu_count": "4",
+    },
+    num_cores = "2",
+    target_under_test = ":lb_32x128_reserve_route",
+)
+
+stage_exec_properties_test(
+    name = "stage_exec_properties_place_test",
+    expected_exec_properties = {"OSFamily": "linux"},
+    target_under_test = ":lb_32x128_reserve_place",
 )
 
 # Exercises user_arguments: project-specific env vars that intentionally
@@ -2197,6 +2250,8 @@ slang_frontend_test_suite(name = "slang_frontend_test")
 hierarchical_default_test_suite(name = "hierarchical_default_test")
 
 repeatable_default_test_suite(name = "repeatable_default_test")
+
+stage_exec_properties_test_suite(name = "stage_exec_properties_unit_test")
 
 # The frontend policy reaches a standalone orfs_synth, not just a flow,
 # and yosys_frontend_reason is consumed by the macro: orfs_synth_rule

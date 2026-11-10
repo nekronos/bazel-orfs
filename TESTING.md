@@ -102,6 +102,7 @@ generate_ram ones are to move to OpenROAD/ORFS. Run them with
 | `openroad` override | mock-openroad variants |
 | `yosys` override | (via sweep kwargs) |
 | `stage_arguments` | tag_array (explicit regression test) |
+| `stage_exec_properties` | `//test:stage_exec_properties_*` (merge per key, `NUM_CORES` from `cpu_count`) |
 | `extra_configs` | sram/BUILD (config injection) |
 | `SYNTH_HIERARCHICAL` (serial) | L1MetadataArray |
 | Parallel synth, pinned `SYNTH_KEEP_MODULES` | `//test:kept_modules_synth_test` |
