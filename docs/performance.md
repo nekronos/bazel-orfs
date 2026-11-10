@@ -138,6 +138,41 @@ bazelisk run //:dirty -- start //sram:sram_64x128_place
 tmp/sram/sram_64x128/make do-3_4_place_resized
 ```
 
+## Per-stage reservations for remote execution
+
+A remote-execution scheduler places an action on a worker by the
+`exec_properties` of its target. `orfs_flow(exec_properties = ...)` gives
+every stage the same ones, but the stages differ: a floorplan runs on a
+thread or two, a global route that averages ~8 threads wants eight CPUs
+and several times the floorplan's memory. `stage_exec_properties` sets
+them per stage target:
+
+```starlark
+orfs_flow(
+    name = "my_block",
+    exec_properties = {"OSFamily": "linux"},
+    stage_exec_properties = {
+        "grt": {"cpu_count": "8", "memory_kb": "16777216"},
+        "route": {"cpu_count": "8"},
+    },
+    ...
+)
+```
+
+A stage's entry merges per key over the flow's `exec_properties`: the
+`grt` target above runs with `OSFamily`, `cpu_count` and `memory_kb`.
+The keys are the scheduler's; bazel-orfs passes them through.
+
+One key is read: `cpu_count`. ORFS runs OpenROAD with `-threads
+$(NUM_CORES)`, and `NUM_CORES` defaults to every CPU of the machine the
+action runs on; on a shared worker that is not what the action reserved.
+A stage whose `exec_properties` carry `cpu_count` gets `NUM_CORES` set to
+it, unless the flow's `arguments` or that stage's `stage_arguments` set
+`NUM_CORES`. This holds for a flow-wide `cpu_count` too.
+
+A squashed flow runs its stages in one action and refuses
+`stage_exec_properties`; set `exec_properties` for the flow instead.
+
 ## Query timing interactively
 
 Open an interactive OpenROAD shell or GUI to investigate a completed stage:

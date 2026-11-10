@@ -36,6 +36,10 @@ load(
 # Read only by mock_area.tcl and mock_pins.tcl, for the mocked variant.
 MOCK_PIN_VARIABLES = ("MOCK_AREA_PIN_EDGES", "MOCK_AREA_PIN_MARGIN")
 
+# The exec_properties key a remote-execution scheduler reserves CPUs by,
+# the name NativeLink's example worker configuration gives it.
+_CPU_COUNT_PROPERTY = "cpu_count"
+
 def _strip_tool_kwargs(**kwargs):
     """Strip stage-only kwargs for non-stage targets (orfs_macro, orfs_arguments).
 
@@ -151,6 +155,43 @@ def repeatable_arguments(arguments):
     """
     return {"SYNTH_REPEATABLE_BUILD": "1"} | arguments
 
+def stage_exec_properties_of(stage, exec_properties, stage_exec_properties):
+    """Returns one stage's exec_properties: the flow's, then the stage's own over them.
+
+    The merge is per key, so the platform properties a flow sets for every
+    stage (OSFamily, a container image) survive a stage entry that only
+    reserves more CPUs or memory.
+
+    Args:
+        stage: the stage key, e.g. "grt".
+        exec_properties: the flow's exec_properties, or None.
+        stage_exec_properties: orfs_flow's stage_exec_properties.
+
+    Returns:
+        The stage's exec_properties dict.
+    """
+    return (exec_properties or {}) | stage_exec_properties.get(stage, {})
+
+def num_cores_arguments(arguments, exec_properties):
+    """Returns arguments with NUM_CORES set to the CPUs exec_properties reserves.
+
+    ORFS runs openroad with -threads $(NUM_CORES), and NUM_CORES defaults
+    to every CPU of the machine running the action; on a shared remote
+    worker that is not the cpu_count the action reserved. A NUM_CORES the
+    arguments already set is kept.
+
+    Args:
+        arguments: a stage's arguments.
+        exec_properties: the stage target's exec_properties, or None.
+
+    Returns:
+        The arguments, sorted, with NUM_CORES when exec_properties has a cpu_count.
+    """
+    cpus = (exec_properties or {}).get(_CPU_COUNT_PROPERTY)
+    if not cpus or "NUM_CORES" in arguments:
+        return arguments
+    return dict(sorted((arguments | {"NUM_CORES": cpus}).items()))
+
 def _merge_extra_arguments(a, b):
     """Merge two {stage: [label, ...]} dicts, concatenating per-stage lists."""
     merged = dict(a)
@@ -208,6 +249,7 @@ def _filter_stage_args(stage, **kwargs):
         stage_arguments = stage_arguments,
         user_stages = user_stages,
     )
+    own = num_cores_arguments(own, kwargs.get("exec_properties"))
 
     # What the stages after this one are configured with, for a deployed
     # tree of this stage run under ORFS_DEPLOY_ANY_STAGE=1. A tree carries
@@ -473,6 +515,7 @@ def orfs_flow(
         previous_stage = {},
         pdk = None,
         stage_data = {},
+        stage_exec_properties = {},
         squash = False,
         substeps = False,
         save_odb = True,
@@ -552,6 +595,12 @@ def orfs_flow(
         first stage refuses it at analysis otherwise.
       pdk: name of the PDK to use, default is asap7
       stage_data: dictionary keyed by ORFS stages with lists of stage-specific data files
+      stage_exec_properties: dictionary keyed by ORFS stages with exec_properties for that
+        stage's target, merged per key over the flow's own exec_properties, e.g.
+        {"grt": {"cpu_count": "8", "memory_kb": "16777216"}} for a remote-execution
+        scheduler that reserves by those keys. A stage whose exec_properties carry
+        "cpu_count" runs OpenROAD with NUM_CORES set to it, unless its arguments
+        set NUM_CORES. Not with squash.
       squash: if True, combine all stages after synthesis into a single Bazel action.
         Reduces artifact size by avoiding intermediate ODB checkpoints. Useful for
         stable designs like RAM macros where intermediate stages don't need inspection.
@@ -600,6 +649,15 @@ def orfs_flow(
         )
     if abstract_stage and last_stage:
         fail("abstract_stage and last_stage are mutually exclusive")
+    for stage in stage_exec_properties:
+        if stage not in ALL_STAGES_LIST:
+            fail("stage_exec_properties: unknown stage {stage}, must be one of: {legal}".format(
+                stage = stage,
+                legal = ", ".join(ALL_STAGES_LIST),
+            ))
+    if squash and stage_exec_properties:
+        fail("stage_exec_properties: a squashed flow runs its stages in one action; " +
+             "set exec_properties for the flow instead")
     if variant == "base":
         variant = None
     if top == None:
@@ -634,6 +692,7 @@ def orfs_flow(
         previous_stage = previous_stage,
         pdk = pdk,
         stage_data = stage_data,
+        stage_exec_properties = stage_exec_properties,
         squash = squash,
         substeps = substeps,
         save_odb = save_odb,
@@ -699,6 +758,7 @@ def orfs_flow(
         previous_stage = {},
         pdk = pdk,
         stage_data = stage_data,
+        stage_exec_properties = stage_exec_properties,
         **kwargs
     )
 
@@ -732,6 +792,15 @@ def orfs_flow(
 def _kwargs(stage, **kwargs):
     return {k: v[stage] for k, v in kwargs.items() if stage in v and v[stage]}
 
+def _exec_kwargs(stage, kwargs, stage_exec_properties):
+    if stage not in stage_exec_properties:
+        return {}
+    return {"exec_properties": stage_exec_properties_of(
+        stage,
+        kwargs.get("exec_properties"),
+        stage_exec_properties,
+    )}
+
 def _orfs_pass(
         name,
         top,
@@ -751,6 +820,7 @@ def _orfs_pass(
         previous_stage,
         pdk,
         stage_data,
+        stage_exec_properties = {},
         kept_macros = None,
         canon_blackbox_macros = [],
         last_stage = None,
@@ -835,7 +905,7 @@ def _orfs_pass(
                 extra_configs = extra_configs,
                 stage_data = stage_data,
                 save_odb = save_odb,
-                **kwargs
+                **(kwargs | _exec_kwargs(synth_step.stage, kwargs, stage_exec_properties))
             )
         )
         if save_odb:
@@ -894,6 +964,7 @@ def _orfs_pass(
                     extra_arguments = dict(extra_arguments),
                     extra_configs = dict(extra_configs),
                     stage_data = dict(stage_data),
+                    exec_properties = kwargs.get("exec_properties"),
                 )
                 all_arguments.update(stage_filtered.get("arguments", {}))
                 for d in stage_filtered.get("data", []):
@@ -980,6 +1051,7 @@ def _orfs_pass(
                         step.stage,
                         renamed_inputs = renamed_inputs,
                     ) |
+                    _exec_kwargs(step.stage, kwargs, stage_exec_properties) |
                     more_kwargs
                 )
             )
@@ -1032,7 +1104,8 @@ def _orfs_pass(
                 stage_data = stage_data,
                 **(
                     kwargs |
-                    _kwargs(ABSTRACT_IMPL.stage, renamed_inputs = renamed_inputs)
+                    _kwargs(ABSTRACT_IMPL.stage, renamed_inputs = renamed_inputs) |
+                    _exec_kwargs(ABSTRACT_IMPL.stage, kwargs, stage_exec_properties)
                 )
             )
         )
